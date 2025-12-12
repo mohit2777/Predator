@@ -11,6 +11,8 @@ const fs = require('fs').promises;
 const axios = require('axios');
 const os = require('os');
 require('dotenv').config();
+const pg = require('pg');
+const pgSession = require('connect-pg-simple')(session);
 
 const { requireAuth, requireGuest, checkSessionTimeout, login, logout, getCurrentUser, verifySessionIntegrity } = require('./middleware/auth');
 const { db, MissingWebhookQueueTableError } = require('./config/database');
@@ -75,7 +77,20 @@ const upload = multer({
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Session configuration
+const sessionStore = process.env.DATABASE_URL
+  ? new pgSession({
+    conString: process.env.DATABASE_URL,
+    tableName: 'session',
+    createTableIfMissing: true
+  })
+  : new session.MemoryStore();
+
+if (!process.env.DATABASE_URL && process.env.NODE_ENV === 'production') {
+  logger.warn('WARNING: Using MemoryStore in production. Set DATABASE_URL to use PostgreSQL session store.');
+}
+
 app.use(session({
+  store: sessionStore,
   secret: process.env.SESSION_SECRET || 'your-secret-key-change-this',
   resave: false,
   saveUninitialized: false,
@@ -230,7 +245,7 @@ app.get('/api/health', async (req, res) => {
 app.get('/api/accounts', requireAuth, apiLimiter, async (req, res) => {
   try {
     const accounts = await db.getAccounts();
-    
+
     // Enrich with real-time status from WhatsApp manager (overrides DB status)
     const enrichedAccounts = accounts.map(account => {
       const runtimeStatus = whatsappManager.getAccountStatus(account.id);
@@ -241,7 +256,7 @@ app.get('/api/accounts', requireAuth, apiLimiter, async (req, res) => {
         status: runtimeStatus || account.status
       };
     });
-    
+
     res.json(enrichedAccounts);
   } catch (error) {
     logger.error('Error fetching accounts:', error);
@@ -252,12 +267,12 @@ app.get('/api/accounts', requireAuth, apiLimiter, async (req, res) => {
 app.post('/api/accounts', requireAuth, accountLimiter, validate(schemas.createAccount), async (req, res) => {
   try {
     const { name, description } = req.body;
-    
+
     const account = await whatsappManager.createAccount(name, description);
-    
+
     // Emit socket event
     emitToAll('account-created', account);
-    
+
     res.json(account);
   } catch (error) {
     logger.error('Error creating account:', error);
@@ -268,20 +283,20 @@ app.post('/api/accounts', requireAuth, accountLimiter, validate(schemas.createAc
 app.get('/api/accounts/:id', requireAuth, apiLimiter, async (req, res) => {
   try {
     const account = await db.getAccount(req.params.id);
-    
+
     if (!account) {
       return res.status(404).json({ error: 'Account not found' });
     }
-    
+
     // Add runtime status and override DB status if manager has better info
     const runtimeStatus = whatsappManager.getAccountStatus(account.id);
     account.runtime_status = runtimeStatus;
-    
+
     // Use runtime status if available (more accurate than DB)
     if (runtimeStatus) {
       account.status = runtimeStatus;
     }
-    
+
     res.json(account);
   } catch (error) {
     logger.error(`Error fetching account ${req.params.id}:`, error);
@@ -292,10 +307,10 @@ app.get('/api/accounts/:id', requireAuth, apiLimiter, async (req, res) => {
 app.delete('/api/accounts/:id', requireAuth, apiLimiter, async (req, res) => {
   try {
     await whatsappManager.deleteAccount(req.params.id);
-    
+
     // Emit socket event
     emitToAll('account-deleted', { id: req.params.id });
-    
+
     res.json({ success: true });
   } catch (error) {
     logger.error(`Error deleting account ${req.params.id}:`, error);
@@ -380,11 +395,11 @@ app.post('/api/accounts/:id/webhooks', requireAuth, webhookLimiter, async (req, 
   try {
     const { url, secret, is_active } = req.body;
     const account_id = req.params.id;
-    
+
     if (!url) {
       return res.status(400).json({ error: 'Webhook URL is required' });
     }
-    
+
     const webhookData = {
       id: require('uuid').v4(),
       account_id,
@@ -395,10 +410,10 @@ app.post('/api/accounts/:id/webhooks', requireAuth, webhookLimiter, async (req, 
     };
 
     const webhook = await db.createWebhook(webhookData);
-    
+
     // Emit socket event
     emitToAccount(account_id, 'webhook-created', webhook);
-    
+
     res.json(webhook);
   } catch (error) {
     logger.error('Error creating webhook:', error);
@@ -409,12 +424,12 @@ app.post('/api/accounts/:id/webhooks', requireAuth, webhookLimiter, async (req, 
 app.delete('/api/accounts/:accountId/webhooks/:webhookId', requireAuth, apiLimiter, async (req, res) => {
   try {
     const { accountId, webhookId } = req.params;
-    
+
     await db.deleteWebhook(webhookId);
-    
+
     // Emit socket event
     emitToAccount(accountId, 'webhook-deleted', { id: webhookId });
-    
+
     res.json({ success: true });
   } catch (error) {
     logger.error(`Error deleting webhook ${req.params.webhookId}:`, error);
@@ -425,7 +440,7 @@ app.delete('/api/accounts/:accountId/webhooks/:webhookId', requireAuth, apiLimit
 app.post('/api/webhooks', requireAuth, webhookLimiter, validate(schemas.createWebhook), async (req, res) => {
   try {
     const { account_id, url, secret, is_active } = req.body;
-    
+
     const webhookData = {
       id: require('uuid').v4(),
       account_id,
@@ -436,10 +451,10 @@ app.post('/api/webhooks', requireAuth, webhookLimiter, validate(schemas.createWe
     };
 
     const webhook = await db.createWebhook(webhookData);
-    
+
     // Emit socket event
     emitToAccount(account_id, 'webhook-created', webhook);
-    
+
     res.json(webhook);
   } catch (error) {
     logger.error('Error creating webhook:', error);
@@ -450,7 +465,7 @@ app.post('/api/webhooks', requireAuth, webhookLimiter, validate(schemas.createWe
 app.patch('/api/webhooks/:id/toggle', requireAuth, apiLimiter, async (req, res) => {
   try {
     const webhook = await db.getWebhook(req.params.id);
-    
+
     if (!webhook) {
       return res.status(404).json({ error: 'Webhook not found' });
     }
@@ -473,7 +488,7 @@ app.patch('/api/webhooks/:id/toggle', requireAuth, apiLimiter, async (req, res) 
 app.delete('/api/webhooks/:id', requireAuth, apiLimiter, async (req, res) => {
   try {
     const webhook = await db.getWebhook(req.params.id);
-    
+
     if (!webhook) {
       return res.status(404).json({ error: 'Webhook not found' });
     }
@@ -515,12 +530,12 @@ app.get('/api/accounts/:id/webhook-secrets', requireAuth, apiLimiter, async (req
 app.post('/api/send', requireAuth, messageLimiter, validate(schemas.sendMessage), async (req, res) => {
   try {
     const { account_id, number, message } = req.body;
-    
+
     const result = await whatsappManager.sendMessage(account_id, number, message);
-    
+
     // Emit socket event
     emitToAccount(account_id, 'message-sent', result);
-    
+
     res.json(result);
   } catch (error) {
     logger.error('Error sending message:', error);
@@ -533,22 +548,22 @@ app.post('/api/send-media', requireAuth, messageLimiter, upload.single('media'),
   try {
     const { account_id, number, caption } = req.body;
     const file = req.file;
-    
+
     if (!account_id || !number) {
       return res.status(400).json({ error: 'account_id and number are required' });
     }
-    
+
     if (!file) {
       return res.status(400).json({ error: 'Media file is required' });
     }
-    
+
     // Convert file to base64
     const mediaData = {
       data: file.buffer.toString('base64'),
       mimetype: file.mimetype,
       filename: file.originalname
     };
-    
+
     const result = await whatsappManager.sendMedia(
       account_id,
       number,
@@ -556,10 +571,10 @@ app.post('/api/send-media', requireAuth, messageLimiter, upload.single('media'),
       caption || '',
       {}
     );
-    
+
     // Emit socket event
     emitToAccount(account_id, 'media-sent', result);
-    
+
     res.json(result);
   } catch (error) {
     logger.error('Error sending media:', error);
@@ -573,7 +588,7 @@ app.post('/api/send-buttons', requireAuth, messageLimiter, upload.single('media'
     const { account_id, number, body, title, footer } = req.body;
     let { buttons } = req.body;
     const file = req.file;
-    
+
     if (!account_id || !number || !buttons) {
       return res.status(400).json({ error: 'Missing required fields: account_id, number, buttons' });
     }
@@ -606,17 +621,17 @@ app.post('/api/send-buttons', requireAuth, messageLimiter, upload.single('media'
     // unless we pass it as title/footer or if Buttons supports caption.
     // However, let's pass 'body' as is. If media is present, whatsappManager uses media as content.
     // If the user wants a caption, they might need to put it in title or footer, or we rely on library behavior.
-    
+
     // Actually, looking at my whatsappManager change:
     // let content = body;
     // if (media) content = new MessageMedia(...)
     // So if media is present, body text is ignored as the main content.
-    
+
     const result = await whatsappManager.sendButtons(account_id, number, body, buttons, title, footer, media);
-    
+
     // Emit socket event
     emitToAccount(account_id, 'message-sent', result);
-    
+
     res.json(result);
   } catch (error) {
     logger.error('Error sending buttons:', error);
@@ -628,16 +643,16 @@ app.post('/api/send-buttons', requireAuth, messageLimiter, upload.single('media'
 app.post('/api/send-list', requireAuth, messageLimiter, async (req, res) => {
   try {
     const { account_id, number, body, button_text, sections, title, footer } = req.body;
-    
+
     if (!account_id || !number || !body || !button_text || !sections) {
       return res.status(400).json({ error: 'Missing required fields: account_id, number, body, button_text, sections' });
     }
 
     const result = await whatsappManager.sendList(account_id, number, body, button_text, sections, title, footer);
-    
+
     // Emit socket event
     emitToAccount(account_id, 'message-sent', result);
-    
+
     res.json(result);
   } catch (error) {
     logger.error('Error sending list:', error);
@@ -738,22 +753,22 @@ app.post('/api/webhook-reply', apiLimiter, validate(schemas.webhookReply), async
   try {
     const { account_id, number, message, webhook_secret, media, caption } = req.body;
     const isN8n = req.headers['user-agent']?.includes('n8n') || req.query.source === 'n8n';
-    
+
     // Validate at least message or media is provided
     if (!message && (!media || (!media.data && !media.url))) {
-      return res.status(400).json({ 
-        error: 'Either message text or media (with data or url) is required' 
+      return res.status(400).json({
+        error: 'Either message text or media (with data or url) is required'
       });
     }
-    
+
     // Verify webhook secret
     const webhooks = await db.getWebhooks(account_id);
-    
+
     if (!webhooks || webhooks.length === 0) {
       return res.status(404).json({ error: 'No webhooks configured for this account' });
     }
-    
-    const validWebhook = webhooks.find(webhook => 
+
+    const validWebhook = webhooks.find(webhook =>
       webhook.secret === webhook_secret && webhook.is_active
     );
 
@@ -765,12 +780,12 @@ app.post('/api/webhook-reply', apiLimiter, validate(schemas.webhookReply), async
     // For n8n requests, respond immediately and process in background
     if (isN8n) {
       res.json({ status: 'pending', message: 'Message queued for delivery' });
-      
+
       // Process in background
       const sendPromise = media && (media.data || media.url) && media.mimetype
         ? whatsappManager.sendMedia(account_id, number, media, caption || message || '')
         : whatsappManager.sendMessage(account_id, number, message);
-      
+
       sendPromise
         .then(result => logger.info(`Background message sent: ${result.success}`))
         .catch(err => logger.error(`Background message error:`, err));
@@ -779,7 +794,7 @@ app.post('/api/webhook-reply', apiLimiter, validate(schemas.webhookReply), async
       const result = media && (media.data || media.url) && media.mimetype
         ? await whatsappManager.sendMedia(account_id, number, media, caption || message || '')
         : await whatsappManager.sendMessage(account_id, number, message);
-      
+
       res.json(result);
     }
   } catch (error) {
@@ -796,7 +811,7 @@ app.get('/api/accounts/:id/logs', requireAuth, apiLimiter, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
     const offset = parseInt(req.query.offset) || 0;
-    
+
     const logs = await db.getMessageLogs(req.params.id, limit);
     res.json(logs);
   } catch (error) {
@@ -810,7 +825,7 @@ app.get('/api/messages', requireAuth, apiLimiter, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
     const offset = parseInt(req.query.offset) || 0;
-    
+
     // Get all messages from database
     const logs = await db.getAllMessageLogs(limit, offset);
     res.json(logs);
@@ -828,18 +843,18 @@ app.get('/api/stats', requireAuth, apiLimiter, async (req, res) => {
   try {
     const accounts = await db.getAccounts();
     const totalAccounts = accounts.length;
-    const activeAccounts = accounts.filter(a => 
+    const activeAccounts = accounts.filter(a =>
       whatsappManager.getAccountStatus(a.id) === 'ready'
     ).length;
-    
+
     let totalMessages = 0;
     let successMessages = 0;
     let incomingMessages = 0;
     let outgoingMessages = 0;
     let failedMessages = 0;
-    
+
     const accountStats = [];
-    
+
     // Parallelize stats fetching
     const statsPromises = accounts.map(async (account) => {
       const stats = await db.getMessageStats(account.id);
@@ -848,9 +863,9 @@ app.get('/api/stats', requireAuth, apiLimiter, async (req, res) => {
         stats
       };
     });
-    
+
     const results = await Promise.all(statsPromises);
-    
+
     let totalOutgoingSuccess = 0;
 
     for (const { account, stats } of results) {
@@ -860,7 +875,7 @@ app.get('/api/stats', requireAuth, apiLimiter, async (req, res) => {
       outgoingMessages += stats.outgoing;
       failedMessages += stats.failed;
       totalOutgoingSuccess += (stats.outgoing_success || 0);
-      
+
       accountStats.push({
         id: account.id,
         name: account.name || 'Unnamed',
@@ -871,12 +886,12 @@ app.get('/api/stats', requireAuth, apiLimiter, async (req, res) => {
         outgoing: stats.outgoing
       });
     }
-    
+
     // Calculate success rate based on OUTGOING messages only
     // Success Rate = (Successful Outgoing / Total Outgoing) * 100
     const successRate = outgoingMessages > 0 ? Math.round((totalOutgoingSuccess / outgoingMessages) * 100) : 0;
     const dailyStats = await db.getDailyMessageStats(7);
-    
+
     res.json({
       totalAccounts,
       activeAccounts,
@@ -905,23 +920,23 @@ app.post('/webhook/:accountId', apiLimiter, async (req, res) => {
   try {
     const { accountId } = req.params;
     const messageData = req.body;
-    
+
     // Validate accountId is UUID
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(accountId)) {
       return res.status(400).json({ error: 'Invalid account ID format' });
     }
-    
+
     // Verify account exists
     const account = await db.getAccount(accountId);
     if (!account) {
       return res.status(404).json({ error: 'Account not found' });
     }
-    
+
     // Validate messageData is not empty
     if (!messageData || typeof messageData !== 'object') {
       return res.status(400).json({ error: 'Invalid message data' });
     }
-    
+
     await db.logMessage({
       account_id: accountId,
       direction: 'webhook_incoming',
@@ -929,7 +944,7 @@ app.post('/webhook/:accountId', apiLimiter, async (req, res) => {
       message: JSON.stringify(messageData),
       created_at: new Date().toISOString()
     });
-    
+
     res.json({ success: true, received_at: new Date().toISOString() });
   } catch (error) {
     logger.error('Error processing incoming webhook:', error);
@@ -958,7 +973,7 @@ app.get('/views/dashboard', requireAuth, async (req, res) => {
       success: successMessages,
       successRate: totalMessages > 0 ? Math.round((successMessages / totalMessages) * 100) : 0
     };
-    
+
     res.json({ accounts, stats });
   } catch (error) {
     logger.error('Error loading dashboard data:', error);
@@ -980,11 +995,11 @@ app.get('/views/webhooks', requireAuth, async (req, res) => {
   try {
     const accounts = await db.getAccounts();
     const webhooks = {};
-    
+
     for (const account of accounts) {
       webhooks[account.id] = await db.getWebhooks(account.id);
     }
-    
+
     res.json({ accounts, webhooks });
   } catch (error) {
     logger.error('Error loading webhooks:', error);
@@ -996,11 +1011,11 @@ app.get('/views/messages', requireAuth, async (req, res) => {
   try {
     const accounts = await db.getAccounts();
     const messages = {};
-    
+
     for (const account of accounts) {
       messages[account.id] = await db.getMessageLogs(account.id, 50);
     }
-    
+
     res.json({ accounts, messages });
   } catch (error) {
     logger.error('Error loading messages:', error);
@@ -1021,7 +1036,7 @@ app.use((req, res) => {
 // Global error handler
 app.use((err, req, res, next) => {
   logger.error('Unhandled error:', err);
-  
+
   res.status(err.status || 500).json({
     error: 'Internal server error',
     message: process.env.NODE_ENV === 'development' ? err.message : 'An error occurred'
@@ -1035,11 +1050,11 @@ app.use((err, req, res, next) => {
 async function initializeApp() {
   try {
     logger.info('Initializing WhatsApp Multi-Automation System V2...');
-    
+
     // Create sessions directory
     const fs = require('fs-extra');
     await fs.ensureDir('./sessions');
-    
+
     // Initialize existing accounts
     await whatsappManager.initializeExistingAccounts();
     try {
@@ -1047,7 +1062,7 @@ async function initializeApp() {
     } catch (error) {
       logger.error('Failed to start WebhookDeliveryService:', error);
     }
-    
+
     logger.info('System initialized successfully!');
   } catch (error) {
     logger.error('Error initializing app:', error);
@@ -1088,7 +1103,7 @@ app.get('/health', async (req, res) => {
       },
       webhookQueue: queueStats
     };
-    
+
     res.json(health);
   } catch (error) {
     logger.error('Health endpoint error:', error);
@@ -1100,17 +1115,17 @@ app.get('/health', async (req, res) => {
 app.get('/ready', async (req, res) => {
   try {
     await db.getAccounts();
-    res.json({ 
+    res.json({
       status: 'ready',
       database: 'connected',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
     logger.error('Readiness check failed:', error);
-    res.status(503).json({ 
-      status: 'not ready', 
+    res.status(503).json({
+      status: 'not ready',
       database: 'disconnected',
-      error: error.message 
+      error: error.message
     });
   }
 });
@@ -1132,7 +1147,7 @@ app.use((err, req, res, next) => {
     path: req.path,
     method: req.method
   });
-  
+
   // Database connection errors
   if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === '57P01') {
     return res.status(503).json({
@@ -1141,7 +1156,7 @@ app.use((err, req, res, next) => {
       code: 'DB_UNAVAILABLE'
     });
   }
-  
+
   // Rate limit errors
   if (err.status === 429) {
     return res.status(429).json({
@@ -1150,7 +1165,7 @@ app.use((err, req, res, next) => {
       retryAfter: err.retryAfter
     });
   }
-  
+
   // Validation errors
   if (err.name === 'ValidationError' || err.isJoi) {
     return res.status(400).json({
@@ -1159,12 +1174,12 @@ app.use((err, req, res, next) => {
       details: err.details
     });
   }
-  
+
   // Generic server error
   res.status(err.status || 500).json({
     error: 'Internal server error',
-    message: process.env.NODE_ENV === 'production' 
-      ? 'Something went wrong on our end' 
+    message: process.env.NODE_ENV === 'production'
+      ? 'Something went wrong on our end'
       : err.message,
     ...(process.env.NODE_ENV !== 'production' && { stack: err.stack })
   });
@@ -1194,7 +1209,7 @@ server.listen(PORT, () => {
   logger.info(`💚 Health: http://localhost:${PORT}/health`);
   logger.info(`✅ Ready: http://localhost:${PORT}/ready`);
   logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  
+
   initializeApp();
   startKeepAlivePing();
 });
@@ -1205,7 +1220,7 @@ server.listen(PORT, () => {
 
 const shutdown = async (signal) => {
   logger.info(`${signal} received, shutting down gracefully...`);
-  
+
   try {
     webhookDeliveryService.stop();
     logger.info('WebhookDeliveryService stopped');
@@ -1222,7 +1237,7 @@ const shutdown = async (signal) => {
   } catch (error) {
     logger.error('Error shutting down WhatsApp clients:', error);
   }
-  
+
   // Flush pending messages
   try {
     await db.flushMessageQueue();
@@ -1230,13 +1245,13 @@ const shutdown = async (signal) => {
   } catch (error) {
     logger.error('Error flushing message queue:', error);
   }
-  
+
   // Close server
   server.close(() => {
     logger.info('HTTP server closed');
     process.exit(0);
   });
-  
+
   // Force exit after 30 seconds
   setTimeout(() => {
     logger.error('Forcefully shutting down');
@@ -1261,7 +1276,7 @@ process.on('unhandledRejection', (reason, promise) => {
 app.get('/api/logs', requireAuth, apiLimiter, async (req, res) => {
   try {
     const logFile = path.join(__dirname, 'logs', 'combined.log');
-    
+
     // Check if file exists
     try {
       await fs.access(logFile);
@@ -1272,10 +1287,10 @@ app.get('/api/logs', requireAuth, apiLimiter, async (req, res) => {
     // Read file
     const content = await fs.readFile(logFile, 'utf8');
     const lines = content.trim().split('\n');
-    
+
     // Get last 100 lines
     const recentLogs = lines.slice(-100).reverse();
-    
+
     // Parse JSON logs if possible
     const parsedLogs = recentLogs.map(line => {
       try {
