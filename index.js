@@ -24,6 +24,9 @@ const { validate, schemas } = require('./utils/validator');
 const { apiLimiter, authLimiter, messageLimiter, webhookLimiter, accountLimiter } = require('./utils/rateLimiter');
 
 const app = express();
+
+// Trust proxy (required for Render/Heroku SSL)
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
