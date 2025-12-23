@@ -1154,57 +1154,7 @@ app.get('/views/messages', requireAuth, async (req, res) => {
 });
 
 // ============================================================================
-// ERROR HANDLING
-// ============================================================================
-
-// 404 handler
-app.use((req, res) => {
-  logger.warn(`404 Not Found: ${req.method} ${req.path}`);
-  res.status(404).json({ error: 'Not found', path: req.path });
-});
-
-// Global error handler
-app.use((err, req, res, next) => {
-  logger.error('Unhandled error:', err);
-
-  res.status(err.status || 500).json({
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'An error occurred'
-  });
-});
-
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
-
-async function initializeApp() {
-  try {
-    logger.info('Initializing WhatsApp Multi-Automation System V2...');
-
-    // Create sessions directory
-    const fs = require('fs-extra');
-    await fs.ensureDir('./sessions');
-
-    // Initialize flow controller with whatsappManager reference
-    const { initializeFlowController } = require('./controllers/flowController');
-    initializeFlowController(whatsappManager);
-
-    // Initialize existing accounts
-    await whatsappManager.initializeExistingAccounts();
-    try {
-      await webhookDeliveryService.start();
-    } catch (error) {
-      logger.error('Failed to start WebhookDeliveryService:', error);
-    }
-
-    logger.info('System initialized successfully!');
-  } catch (error) {
-    logger.error('Error initializing app:', error);
-  }
-}
-
-// ============================================================================
-// HEALTH CHECK & MONITORING ENDPOINTS
+// HEALTH CHECK & MONITORING ENDPOINTS (Must be before 404 handler)
 // ============================================================================
 
 // Ultra-lightweight ping endpoint for UptimeRobot/Cron-job.org (keeps Render awake)
@@ -1278,6 +1228,56 @@ app.get('/ready', async (req, res) => {
     });
   }
 });
+
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+
+// 404 handler
+app.use((req, res) => {
+  logger.warn(`404 Not Found: ${req.method} ${req.path}`);
+  res.status(404).json({ error: 'Not found', path: req.path });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  logger.error('Unhandled error:', err);
+
+  res.status(err.status || 500).json({
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'An error occurred'
+  });
+});
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+async function initializeApp() {
+  try {
+    logger.info('Initializing WhatsApp Multi-Automation System V2...');
+
+    // Create sessions directory
+    const fs = require('fs-extra');
+    await fs.ensureDir('./sessions');
+
+    // Initialize flow controller with whatsappManager reference
+    const { initializeFlowController } = require('./controllers/flowController');
+    initializeFlowController(whatsappManager);
+
+    // Initialize existing accounts
+    await whatsappManager.initializeExistingAccounts();
+    try {
+      await webhookDeliveryService.start();
+    } catch (error) {
+      logger.error('Failed to start WebhookDeliveryService:', error);
+    }
+
+    logger.info('System initialized successfully!');
+  } catch (error) {
+    logger.error('Error initializing app:', error);
+  }
+}
 
 // ============================================================================
 // GLOBAL ERROR HANDLER
