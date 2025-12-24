@@ -314,47 +314,12 @@ class WhatsAppManager {
 
         logger.info(`✅ WhatsApp client ready for account ${accountId} (${phoneNumber})`);
 
-        // Save session after successful connection
-        // Wait 10 seconds for browser state to stabilize, then save ONCE
-        if (client.authStrategy instanceof RemoteAuth) {
-          setTimeout(async () => {
-            try {
-              // Check if still ready
-              if (this.accountStatus.get(accountId) !== 'ready') {
-                logger.warn(`[${accountId}] Status changed, skipping session save`);
-                return;
-              }
-              
-              // Check memory before save
-              const memUsage = process.memoryUsage();
-              const heapUsedMB = memUsage.heapUsed / 1024 / 1024;
-              logger.info(`[${accountId}] Memory before session save: ${heapUsedMB.toFixed(0)}MB heap`);
-              
-              if (heapUsedMB > 350) {
-                logger.warn(`[${accountId}] Memory too high, deferring session save`);
-                // Try again in 30 seconds
-                setTimeout(async () => {
-                  try {
-                    if (this.accountStatus.get(accountId) === 'ready') {
-                      await client.authStrategy.saveSession();
-                      logger.info(`✅ [${accountId}] Deferred session save completed`);
-                    }
-                  } catch (e) {
-                    logger.error(`[${accountId}] Deferred session save failed:`, e.message);
-                  }
-                }, 30000);
-                return;
-              }
-              
-              await client.authStrategy.saveSession();
-              logger.info(`✅ [${accountId}] Session saved to database`);
-              
-            } catch (err) {
-              logger.error(`[${accountId}] Session save failed:`, err.message);
-            }
-          }, 10000); // Wait 10 seconds after ready
+        // Session save is handled by RemoteAuth.afterAuthReady() with 60 second delay
+        // This allows the session to fully stabilize before saving (per official whatsapp-web.js recommendation)
+        // We only set up periodic saves here - initial save is handled by RemoteAuth
 
-          // Set up periodic save - default 15 minutes
+        // Set up periodic save - default 15 minutes  
+        if (client.authStrategy instanceof RemoteAuth) {
           if (process.env.DISABLE_PERIODIC_SESSION_SAVE !== 'true') {
             if (client.saveInterval) clearInterval(client.saveInterval);
 

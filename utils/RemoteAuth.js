@@ -2,8 +2,11 @@
  * RemoteAuth Strategy for whatsapp-web.js
  * Stores WhatsApp session data in Supabase database
  * 
- * SIMPLIFIED & ROBUST VERSION - Saves ALL essential session files
- * No aggressive filtering - captures everything needed for session persistence
+ * Based on official RemoteAuth approach - only saves essential files:
+ * - Default/IndexedDB (WhatsApp data)
+ * - Default/Local Storage (WhatsApp auth tokens)
+ * 
+ * KEY INSIGHT: Official RemoteAuth waits 60 seconds after auth for session stability
  */
 
 const { db } = require('../config/database');
@@ -17,13 +20,15 @@ const util = require('util');
 const gzip = util.promisify(zlib.gzip);
 const gunzip = util.promisify(zlib.gunzip);
 
-// Session size limits
-const MAX_TOTAL_SIZE = 5 * 1024 * 1024; // 5MB max total
-const MAX_FILE_SIZE = 1024 * 1024; // 1MB max per file
+// Size limits
+const MAX_TOTAL_SIZE = 15 * 1024 * 1024; // 15MB max
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB per file
+
+// Essential directories for WhatsApp session (from official RemoteAuth)
+const ESSENTIAL_DIRS = ['IndexedDB', 'Local Storage'];
 
 /**
- * Pre-restore session files from database BEFORE client initialization
- * Called from whatsappManager BEFORE creating the Client
+ * Pre-restore session from database before client init
  */
 async function preRestoreSession(accountId, dataPath = './wa-sessions-temp') {
   const sessionPath = path.join(dataPath, accountId);
@@ -32,130 +37,82 @@ async function preRestoreSession(accountId, dataPath = './wa-sessions-temp') {
     await fs.mkdir(dataPath, { recursive: true });
     await fs.mkdir(sessionPath, { recursive: true });
     
-    logger.info(`[Session] Checking database for session: ${accountId}`);
+    logger.info(`[Session] Checking database for: ${accountId}`);
     
     const sessionData = await db.getSessionData(accountId);
-    
     if (!sessionData) {
-      logger.info(`[Session] No saved session found for: ${accountId}`);
+      logger.info(`[Session] No saved session for: ${accountId}`);
       return { restored: false, sessionPath };
     }
 
-    // Decode and parse
+    // Decode
     const payloadJson = Buffer.from(sessionData, 'base64').toString('utf-8');
-    let payloadObj;
-    
+    let payload;
     try {
-      payloadObj = JSON.parse(payloadJson);
+      payload = JSON.parse(payloadJson);
     } catch (e) {
-      logger.error('[Session] Failed to parse session data - corrupted');
+      logger.error('[Session] Corrupted session data, clearing');
       await db.clearSessionData(accountId);
       return { restored: false, sessionPath };
     }
 
     let files;
-
-    // Handle compressed format (V2)
-    if (payloadObj.type === 'session_v2' && payloadObj.data) {
+    
+    // Decompress - support multiple versions
+    if (payload.data) {
       try {
-        const compressedBuffer = Buffer.from(payloadObj.data, 'base64');
-        const decompressed = await gunzip(compressedBuffer);
+        const compressed = Buffer.from(payload.data, 'base64');
+        const decompressed = await gunzip(compressed);
         const sessionObj = JSON.parse(decompressed.toString('utf-8'));
         files = sessionObj.files;
-        logger.info(`[Session] Decompressed session: ${Object.keys(files).length} files`);
       } catch (err) {
         logger.error('[Session] Decompression failed:', err.message);
         await db.clearSessionData(accountId);
         return { restored: false, sessionPath };
       }
-    } 
-    // Handle legacy formats
-    else if (payloadObj.type === 'folder_dump_v2' && payloadObj.data) {
-      try {
-        const compressedBuffer = Buffer.from(payloadObj.data, 'base64');
-        const decompressed = await gunzip(compressedBuffer);
-        const sessionObj = JSON.parse(decompressed.toString('utf-8'));
-        files = sessionObj.files;
-      } catch (err) {
-        logger.error('[Session] Legacy decompression failed');
-        await db.clearSessionData(accountId);
-        return { restored: false, sessionPath };
-      }
-    }
-    else if (payloadObj.type === 'folder_dump') {
-      files = payloadObj.files;
-    }
-    else {
-      logger.warn('[Session] Unknown session format');
-      await db.clearSessionData(accountId);
+    } else {
+      logger.warn('[Session] Unknown format:', payload.type);
       return { restored: false, sessionPath };
     }
 
     if (!files || Object.keys(files).length === 0) {
-      logger.warn('[Session] Empty session data');
+      logger.warn('[Session] Empty session');
       return { restored: false, sessionPath };
     }
 
     const fileCount = Object.keys(files).length;
-    const fileNames = Object.keys(files);
-    logger.info(`[Session] Restoring ${fileCount} files to disk...`);
-    logger.info(`[Session] Files to restore: ${fileNames.slice(0, 10).join(', ')}${fileNames.length > 10 ? '...' : ''}`);
+    logger.info(`[Session] Restoring ${fileCount} files...`);
 
-    // Restore all files
-    let restoredCount = 0;
-    for (const [relativePath, contentBase64] of Object.entries(files)) {
+    let restored = 0;
+    for (const [relPath, b64Content] of Object.entries(files)) {
       try {
-        const fullPath = path.join(sessionPath, relativePath);
-        const dir = path.dirname(fullPath);
-        
-        await fs.mkdir(dir, { recursive: true });
-        await fs.writeFile(fullPath, Buffer.from(contentBase64, 'base64'));
-        restoredCount++;
-      } catch (err) {
-        logger.warn(`[Session] Failed to restore file: ${relativePath}`);
+        const fullPath = path.join(sessionPath, relPath);
+        await fs.mkdir(path.dirname(fullPath), { recursive: true });
+        await fs.writeFile(fullPath, Buffer.from(b64Content, 'base64'));
+        restored++;
+      } catch (e) {
+        logger.warn(`[Session] Failed: ${relPath}`);
       }
     }
     
-    // Verify essential files were restored
-    const hasIndexedDB = fileNames.some(f => f.includes('IndexedDB'));
-    const hasLocalStorage = fileNames.some(f => f.includes('Local Storage'));
-    logger.info(`[Session] Has IndexedDB: ${hasIndexedDB}, LocalStorage: ${hasLocalStorage}`);
-    
-    logger.info(`[Session] ✅ Restored ${restoredCount}/${fileCount} files for ${accountId}`);
+    logger.info(`[Session] ✅ Restored ${restored}/${fileCount} files`);
     return { restored: true, sessionPath };
     
   } catch (error) {
-    logger.error(`[Session] Restore error for ${accountId}:`, error.message);
+    logger.error(`[Session] Restore error:`, error.message);
     return { restored: false, sessionPath };
   }
 }
 
-/**
- * Check if session files exist on disk
- */
 function hasPreRestoredSession(sessionPath) {
   try {
-    // Check for IndexedDB - the key WhatsApp storage
-    const indexedDbPath = path.join(sessionPath, 'Default', 'IndexedDB');
-    if (fsSync.existsSync(indexedDbPath)) {
-      const contents = fsSync.readdirSync(indexedDbPath);
-      if (contents.length > 0) {
-        logger.info(`[Session] Found existing session files at ${sessionPath}`);
-        return true;
-      }
+    const indexedDb = path.join(sessionPath, 'Default', 'IndexedDB');
+    if (fsSync.existsSync(indexedDb)) {
+      const files = fsSync.readdirSync(indexedDb);
+      return files.length > 0;
     }
-    
-    // Also check Local Storage
-    const localStoragePath = path.join(sessionPath, 'Default', 'Local Storage', 'leveldb');
-    if (fsSync.existsSync(localStoragePath)) {
-      const files = fsSync.readdirSync(localStoragePath);
-      if (files.length > 0) {
-        return true;
-      }
-    }
-    
     return false;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -166,10 +123,10 @@ class RemoteAuth extends BaseAuthStrategy {
     this.accountId = options.accountId;
     this.clientId = options.accountId;
     this.dataPath = options.dataPath || './wa-sessions-temp';
-    this.sessionRestored = false;
+    this.saveTimer = null;
     
     if (!this.accountId) {
-      throw new Error('accountId is required for RemoteAuth');
+      throw new Error('accountId is required');
     }
   }
 
@@ -179,8 +136,15 @@ class RemoteAuth extends BaseAuthStrategy {
 
   async afterAuthReady() {
     logger.info(`[Session] Auth ready for ${this.accountId}`);
-    // Save session after authentication
-    setTimeout(() => this.saveSession(), 3000);
+    
+    // Wait 60 seconds before first save (official RemoteAuth requirement)
+    // This allows the session to fully stabilize
+    logger.info(`[Session] Waiting 60s for session to stabilize before saving...`);
+    
+    this.saveTimer = setTimeout(async () => {
+      logger.info(`[Session] Starting initial session save...`);
+      await this.saveSession();
+    }, 60000);
   }
 
   async beforeBrowserInitialized() {
@@ -190,25 +154,20 @@ class RemoteAuth extends BaseAuthStrategy {
       await fs.mkdir(this.dataPath, { recursive: true });
       await fs.mkdir(sessionPath, { recursive: true });
       
-      logger.info(`[Session] Using data directory: ${sessionPath}`);
+      logger.info(`[Session] Data dir: ${sessionPath}`);
 
-      // Set Chrome to use this directory
       this.client.options.puppeteer = {
         ...this.client.options.puppeteer,
         userDataDir: sessionPath
       };
       
-      // Check if already restored
       if (hasPreRestoredSession(sessionPath)) {
-        logger.info(`[Session] Session already on disk, ready to use`);
-        this.sessionRestored = true;
+        logger.info(`[Session] Session files exist, ready`);
         return;
       }
       
-      // Try to restore from database
-      logger.info(`[Session] No local session, checking database...`);
-      const result = await preRestoreSession(this.accountId, this.dataPath);
-      this.sessionRestored = result.restored;
+      logger.info(`[Session] No local files, checking DB...`);
+      await preRestoreSession(this.accountId, this.dataPath);
       
     } catch (error) {
       logger.error('[Session] Setup error:', error.message);
@@ -216,266 +175,126 @@ class RemoteAuth extends BaseAuthStrategy {
   }
 
   async logout() {
-    logger.info(`[Session] Logout called for ${this.accountId} - preserving session data`);
-    // Do NOT clear session data automatically
-    // Only clear local temp files
-    const sessionPath = path.join(this.dataPath, this.accountId);
-    try {
-      await fs.rm(sessionPath, { recursive: true, force: true });
-    } catch (e) {
-      // Ignore
-    }
+    logger.info(`[Session] Logout for ${this.accountId}`);
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    // Don't clear session data - user may want to reconnect
   }
 
   async destroy() {
-    logger.info(`[Session] Destroy called for ${this.accountId}`);
-    // Clean local files only
-    const sessionPath = path.join(this.dataPath, this.accountId);
+    logger.info(`[Session] Destroy for ${this.accountId}`);
+    if (this.saveTimer) clearTimeout(this.saveTimer);
     try {
-      await fs.rm(sessionPath, { recursive: true, force: true });
-    } catch (e) {
-      // Ignore
-    }
-  }
-
-  getSessionPath() {
-    return path.join(this.dataPath, this.accountId);
+      await fs.rm(path.join(this.dataPath, this.accountId), { recursive: true, force: true });
+    } catch (e) {}
   }
 
   /**
-   * Collect ONLY essential WhatsApp session files
-   * WhatsApp stores auth in: IndexedDB, Local Storage, Session Storage, and Cookies
-   * Everything else (Chrome components, cache, etc.) is NOT needed
+   * Collect ONLY essential files (IndexedDB + Local Storage)
+   * Based on official RemoteAuth approach
    */
-  async collectSessionFiles(dir, baseDir, stats = { totalSize: 0, files: {} }, depth = 0) {
+  async collectEssentialFiles(sessionPath) {
+    const files = {};
+    let totalSize = 0;
+    
+    const defaultPath = path.join(sessionPath, 'Default');
+    
+    for (const essentialDir of ESSENTIAL_DIRS) {
+      const dirPath = path.join(defaultPath, essentialDir);
+      
+      try {
+        await fs.access(dirPath);
+      } catch {
+        logger.warn(`[Session] Missing essential dir: ${essentialDir}`);
+        continue;
+      }
+      
+      const stats = { totalSize: 0 };
+      await this.collectDirFiles(dirPath, sessionPath, files, stats);
+      totalSize += stats.totalSize;
+    }
+    
+    return { files, totalSize };
+  }
+  
+  async collectDirFiles(dir, baseDir, files, stats) {
     try {
       const entries = await fs.readdir(dir, { withFileTypes: true });
-      const relativeDirPath = path.relative(baseDir, dir);
       
       for (const entry of entries) {
-        if (stats.totalSize > MAX_TOTAL_SIZE) {
-          logger.warn(`[Session] Size limit reached: ${(stats.totalSize / 1024 / 1024).toFixed(2)}MB`);
-          break;
-        }
+        if (stats.totalSize > MAX_TOTAL_SIZE) break;
         
         const fullPath = path.join(dir, entry.name);
-        const relativePath = path.relative(baseDir, fullPath);
+        const relPath = path.relative(baseDir, fullPath);
         
         if (entry.isDirectory()) {
-          // At root level (depth 0), ONLY enter "Default" directory
-          if (depth === 0) {
-            if (entry.name === 'Default') {
-              await this.collectSessionFiles(fullPath, baseDir, stats, depth + 1);
-            }
-            // Skip ALL other root directories (Chrome components, etc.)
-            continue;
-          }
-          
-          // Inside Default (depth 1+), only enter essential directories
-          const essentialDirs = [
-            'IndexedDB',
-            'Local Storage',
-            'Session Storage',
-            'leveldb',
-            'https_web.whatsapp.com_0.indexeddb.leveldb'
-          ];
-          
-          // Skip cache and other unnecessary directories
-          const skipDirs = [
-            'Cache', 
-            'Code Cache', 
-            'GPUCache', 
-            'DawnCache',
-            'ShaderCache',
-            'GrShaderCache',
-            'blob_storage',
-            'shared_proto_db',
-            'VideoDecodeStats',
-            'WebStorage',
-            'Crashpad',
-            'Service Worker',
-            'Network',
-            'optimization_guide_model_store',
-            'BrowserMetrics',
-            'extensions',
-            'component_crx_cache',
-            'SafeBrowsing',
-            'databases',
-            'Feature Engagement Tracker',
-            'GCM Store',
-            'Platform Notifications',
-            'Storage',
-            'Sync Data',
-            'TransportSecurity',
-            'Trust Tokens',
-            'AutofillStrikeDatabase'
-          ];
-          
-          if (skipDirs.includes(entry.name)) {
-            continue;
-          }
-          
-          // Only recurse into essential directories or their children
-          if (essentialDirs.includes(entry.name) || 
-              relativeDirPath.includes('IndexedDB') || 
-              relativeDirPath.includes('Local Storage') ||
-              relativeDirPath.includes('Session Storage')) {
-            await this.collectSessionFiles(fullPath, baseDir, stats, depth + 1);
-          }
+          await this.collectDirFiles(fullPath, baseDir, files, stats);
         } else {
-          // Only collect files inside essential paths
-          const isEssentialPath = 
-            relativePath.includes('IndexedDB') || 
-            relativePath.includes('Local Storage') ||
-            relativePath.includes('Session Storage') ||
-            relativePath.includes('Cookies');
+          // Skip lock files only - keep everything else including LOG files
+          if (['LOCK', 'SingletonLock', 'SingletonCookie', 'SingletonSocket'].includes(entry.name)) continue;
           
-          if (!isEssentialPath) {
-            continue;
-          }
-          
-          // Skip lock and temp files
-          const skipFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort', 'LOCK'];
-          const skipExtensions = ['-journal', '.tmp'];
-          
-          if (skipFiles.includes(entry.name)) continue;
-          if (skipExtensions.some(ext => entry.name.endsWith(ext))) continue;
-          if (entry.name.startsWith('.')) continue;
-          
-          // Check file size
           try {
-            const fileStat = await fs.stat(fullPath);
-            if (fileStat.size === 0) continue;
-            if (fileStat.size > MAX_FILE_SIZE) {
-              logger.debug(`[Session] Skipping large file: ${relativePath} (${(fileStat.size/1024).toFixed(0)}KB)`);
-              continue;
-            }
+            const stat = await fs.stat(fullPath);
+            if (stat.size === 0 || stat.size > MAX_FILE_SIZE) continue;
             
-            // Read file
             const content = await fs.readFile(fullPath);
-            stats.files[relativePath] = content.toString('base64');
+            files[relPath] = content.toString('base64');
             stats.totalSize += content.length;
-          } catch (err) {
-            // Skip files we can't read (locked, etc)
-            continue;
+          } catch (e) {
+            // Skip locked/unreadable files
           }
         }
       }
-      
-      return stats;
     } catch (error) {
-      logger.error(`[Session] Error collecting files:`, error.message);
-      return stats;
+      // Dir doesn't exist or can't read
     }
   }
 
-  /**
-   * Collect essential files directly in Default/ folder (Cookies, etc.)
-   */
-  async collectDefaultFiles(sessionPath, stats) {
-    const defaultPath = path.join(sessionPath, 'Default');
-    const essentialFiles = ['Cookies']; // Only Cookies is essential for auth
-    
-    for (const fileName of essentialFiles) {
-      try {
-        const filePath = path.join(defaultPath, fileName);
-        const fileStat = await fs.stat(filePath);
-        if (fileStat.size > 0 && fileStat.size < MAX_FILE_SIZE) {
-          const content = await fs.readFile(filePath);
-          const relativePath = path.join('Default', fileName);
-          stats.files[relativePath] = content.toString('base64');
-          stats.totalSize += content.length;
-        }
-      } catch (err) {
-        // File doesn't exist or can't be read
-      }
-    }
-  }
-
-  /**
-   * Save session to database
-   */
   async saveSession() {
     try {
-      const sessionPath = this.getSessionPath();
+      const sessionPath = path.join(this.dataPath, this.accountId);
+      const defaultPath = path.join(sessionPath, 'Default');
       
-      // Verify directory exists
       try {
-        await fs.access(sessionPath);
+        await fs.access(defaultPath);
       } catch {
-        logger.warn(`[Session] No session directory found: ${sessionPath}`);
+        logger.warn(`[Session] No Default folder`);
         return false;
       }
 
-      logger.info(`[Session] Collecting session files from ${sessionPath}...`);
-      const stats = await this.collectSessionFiles(sessionPath, sessionPath);
-      
-      // Also collect essential files from Default/ directly (Cookies)
-      await this.collectDefaultFiles(sessionPath, stats);
-      
-      const fileCount = Object.keys(stats.files).length;
-      const fileNames = Object.keys(stats.files);
-      
-      // Log what we collected for debugging
-      logger.info(`[Session] Collected ${fileCount} files (${(stats.totalSize/1024).toFixed(0)}KB)`);
-      logger.info(`[Session] Files: ${fileNames.join(', ')}`);
+      logger.info(`[Session] Collecting essential files (IndexedDB + Local Storage)...`);
+      const { files, totalSize } = await this.collectEssentialFiles(sessionPath);
+      const fileCount = Object.keys(files).length;
       
       if (fileCount === 0) {
-        logger.warn('[Session] No files collected');
+        logger.warn('[Session] No essential files found');
         return false;
       }
-      
-      // Verify we have essential files
-      const hasIndexedDB = fileNames.some(f => f.includes('IndexedDB'));
-      const hasLocalStorage = fileNames.some(f => f.includes('Local Storage'));
-      const hasCookies = fileNames.some(f => f.includes('Cookies'));
-      
-      logger.info(`[Session] Has IndexedDB: ${hasIndexedDB}, LocalStorage: ${hasLocalStorage}, Cookies: ${hasCookies}`);
-      
-      if (!hasIndexedDB && !hasLocalStorage) {
-        logger.warn(`[Session] Missing essential files (IndexedDB or LocalStorage)`);
-        return false;
-      }
+
+      logger.info(`[Session] Got ${fileCount} files (${(totalSize/1024).toFixed(0)}KB)`);
       
       // Compress
-      const sessionData = {
-        files: stats.files,
-        timestamp: Date.now(),
-        accountId: this.accountId
-      };
+      const data = { files, ts: Date.now(), id: this.accountId };
+      const json = JSON.stringify(data);
+      const compressed = await gzip(json);
       
-      const jsonString = JSON.stringify(sessionData);
-      const compressed = await gzip(jsonString);
-      const compressedBase64 = compressed.toString('base64');
-      
-      // Wrap in storage format
       const payload = JSON.stringify({
-        type: 'session_v2',
-        data: compressedBase64,
-        savedAt: new Date().toISOString()
+        type: 'session_v4',
+        data: compressed.toString('base64'),
+        saved: new Date().toISOString()
       });
       
-      const finalBase64 = Buffer.from(payload).toString('base64');
-      const finalSizeKB = (finalBase64.length / 1024).toFixed(2);
+      const final = Buffer.from(payload).toString('base64');
+      const sizeKB = (final.length / 1024).toFixed(2);
       
-      logger.info(`[Session] Saving to database (${finalSizeKB}KB compressed)...`);
+      logger.info(`[Session] Saving ${sizeKB}KB to database...`);
+      await db.saveSessionData(this.accountId, final);
+      logger.info(`[Session] ✅ Saved (${sizeKB}KB, ${fileCount} files)`);
       
-      await db.saveSessionData(this.accountId, finalBase64);
-      
-      logger.info(`[Session] ✅ Session saved successfully (${finalSizeKB}KB, ${fileCount} files)`);
       return true;
-      
     } catch (error) {
       logger.error(`[Session] Save error:`, error.message);
       return false;
     }
-  }
-
-  /**
-   * Restore session from database (used if pre-restore didn't happen)
-   */
-  async restoreSession() {
-    return await preRestoreSession(this.accountId, this.dataPath);
   }
 }
 
