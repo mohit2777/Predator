@@ -244,11 +244,12 @@ class RemoteAuth extends BaseAuthStrategy {
   }
 
   /**
-   * Helper to recursively read files with size limits
+   * Helper to recursively read ONLY essential files for WhatsApp session
+   * We're very aggressive here to keep total size under 3MB
    */
   async readDirRecursive(dir, baseDir, stats = { totalSize: 0, fileCount: 0 }) {
-    const MAX_TOTAL_SIZE = 10 * 1024 * 1024; // 10MB max total session size
-    const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB max per file
+    const MAX_TOTAL_SIZE = 3 * 1024 * 1024; // 3MB max - very strict for Render 512MB limit
+    const MAX_FILE_SIZE = 500 * 1024; // 500KB max per file
     
     const files = await fs.readdir(dir, { withFileTypes: true });
     let results = {};
@@ -256,7 +257,7 @@ class RemoteAuth extends BaseAuthStrategy {
     for (const file of files) {
       // Stop if we've exceeded max size
       if (stats.totalSize > MAX_TOTAL_SIZE) {
-        logger.warn(`[RemoteAuth] Session size limit reached (${(stats.totalSize / 1024 / 1024).toFixed(2)}MB), stopping collection`);
+        logger.warn(`[RemoteAuth] Session size limit reached (${(stats.totalSize / 1024 / 1024).toFixed(2)}MB), stopping`);
         break;
       }
       
@@ -264,13 +265,18 @@ class RemoteAuth extends BaseAuthStrategy {
       const relativePath = path.relative(baseDir, fullPath);
 
       if (file.isDirectory()) {
-        // Skip non-essential cache directories - be more aggressive to save memory
-        const skipDirs = [
-          'Cache', 'Code Cache', 'GPUCache', 'ShaderCache', 'DawnCache',
-          'blob_storage', 'VideoDecodeStats', 'shared_proto_db', 'WebStorage',
-          'Crashpad', 'BrowserMetrics'
+        // ONLY keep these essential directories for WhatsApp session
+        const essentialDirs = [
+          'Default',
+          'Local Storage',
+          'leveldb',
+          'IndexedDB',
+          'https_web.whatsapp.com_0.indexeddb.leveldb',
+          'Session Storage'
         ];
-        if (skipDirs.includes(file.name)) {
+        
+        // Skip everything except essential dirs
+        if (!essentialDirs.includes(file.name)) {
           continue;
         }
         
@@ -278,13 +284,25 @@ class RemoteAuth extends BaseAuthStrategy {
         Object.assign(results, subResults);
       } else {
         // Skip lock files, logs, and temporary files
-        const skipFiles = ['SingletonLock', 'LOCK', 'lockfile', 'LOG', 'LOG.old', 'DevToolsActivePort'];
+        const skipFiles = ['SingletonLock', 'LOCK', 'lockfile', 'LOG', 'LOG.old', 'DevToolsActivePort', 'CURRENT'];
         const skipExtensions = ['.lock', '.log', '-journal', '.tmp'];
+        
+        // Only keep essential file types
+        const essentialFiles = ['Cookies', 'MANIFEST'];
+        const essentialExtensions = ['.ldb', '.sst'];
+        
+        const isEssential = essentialFiles.some(f => file.name.includes(f)) ||
+                          essentialExtensions.some(ext => file.name.endsWith(ext)) ||
+                          relativePath.includes('Local Storage') ||
+                          relativePath.includes('IndexedDB');
+        
+        if (!isEssential) {
+          continue;
+        }
         
         if (skipFiles.includes(file.name) || 
             skipExtensions.some(ext => file.name.endsWith(ext)) ||
-            file.name.startsWith('.org.chromium.') ||
-            (file.name.startsWith('.') && file.name !== '.'))
+            file.name.startsWith('.'))
         {
           continue;
         }
@@ -365,20 +383,26 @@ class RemoteAuth extends BaseAuthStrategy {
         return;
       }
       
-      // Validate we have essential session files (Cookies or IndexedDB data)
+      // Validate we have essential session files (.ldb files are the key)
       const hasEssentialFiles = fileNames.some(f => 
-        f.includes('Cookies') || 
-        f.includes('IndexedDB') || 
-        f.includes('Local Storage') ||
-        f.includes('leveldb')
+        f.endsWith('.ldb') || 
+        f.includes('Cookies')
       );
       
       if (!hasEssentialFiles) {
-        logger.warn(`[RemoteAuth] Session incomplete - missing essential files (found: ${fileCount} files)`);
+        logger.warn(`[RemoteAuth] Session incomplete - no .ldb files found (collected: ${fileCount} files)`);
+        logger.warn(`[RemoteAuth] Files: ${fileNames.slice(0, 10).join(', ')}...`);
         return;
       }
 
-      logger.info(`[RemoteAuth] Compressing ${fileCount} files...`);
+      // Check if JSON will be too large (rough estimate: base64 is ~1.37x)
+      const estimatedJsonSize = stats.totalSize * 1.37;
+      if (estimatedJsonSize > 5 * 1024 * 1024) {
+        logger.warn(`[RemoteAuth] Estimated JSON size too large (${(estimatedJsonSize / 1024 / 1024).toFixed(2)}MB), skipping save`);
+        return;
+      }
+
+      logger.info(`[RemoteAuth] Compressing ${fileCount} files (${(stats.totalSize / 1024).toFixed(0)}KB)...`);
       
       const sessionData = {
         files: files,
@@ -394,11 +418,19 @@ class RemoteAuth extends BaseAuthStrategy {
         return;
       }
       
-      logger.info(`[RemoteAuth] JSON size: ${(sessionJson.length / 1024).toFixed(0)}KB, compressing...`);
+      // Check actual JSON size
+      const jsonSizeKB = sessionJson.length / 1024;
+      if (jsonSizeKB > 5000) {
+        logger.warn(`[RemoteAuth] JSON too large (${jsonSizeKB.toFixed(0)}KB), aborting to prevent OOM`);
+        sessionJson = null;
+        return;
+      }
+      
+      logger.info(`[RemoteAuth] JSON size: ${jsonSizeKB.toFixed(0)}KB, compressing...`);
       
       const compressed = await gzip(sessionJson);
       
-      // Free up memory
+      // Free up memory immediately
       sessionJson = null;
       
       const compressedBase64 = compressed.toString('base64');
