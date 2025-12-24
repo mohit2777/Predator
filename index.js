@@ -92,20 +92,34 @@ if (process.env.DATABASE_URL) {
     const pgPool = new pg.Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: { rejectUnauthorized: false },
-      connectionTimeoutMillis: 10000,
-      max: 3
+      connectionTimeoutMillis: 30000, // 30s connection timeout
+      idleTimeoutMillis: 60000, // 60s idle timeout
+      max: 2, // Reduce max connections for free tier
+      allowExitOnIdle: true, // Allow pool to close when idle
+      keepAlive: true, // Keep connections alive
+      keepAliveInitialDelayMillis: 10000 // Start keepalive after 10s
     });
     
     pgPool.on('error', (err) => {
-      logger.error('Session DB pool error:', err.message);
+      // Don't crash on connection errors, just log
+      logger.warn('Session DB pool error (non-fatal):', err.message);
+    });
+
+    pgPool.on('connect', () => {
+      logger.debug('Session DB pool: new connection');
     });
     
     sessionStore = new pgSession({
       pool: pgPool,
       tableName: 'session',
       createTableIfMissing: true,
-      pruneSessionInterval: false,
-      errorLog: (err) => logger.error('Session store error:', err.message)
+      pruneSessionInterval: 60 * 15, // Prune every 15 minutes
+      errorLog: (err) => {
+        // Only log actual errors, not timeouts
+        if (!err.message?.includes('timeout')) {
+          logger.warn('Session store error:', err.message);
+        }
+      }
     });
     
     logger.info('Using PostgreSQL for session storage (DATABASE_URL)');
@@ -1659,13 +1673,34 @@ const shutdown = async (signal) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// Handle uncaught exceptions
+// Handle uncaught exceptions - don't crash for non-critical errors
 process.on('uncaughtException', (error) => {
-  logger.error('Uncaught exception:', error);
+  const errorMsg = error?.message || String(error);
+  
+  // Don't shutdown for connection timeouts - they're recoverable
+  if (errorMsg.includes('timeout') || 
+      errorMsg.includes('ECONNRESET') ||
+      errorMsg.includes('ECONNREFUSED') ||
+      errorMsg.includes('Connection terminated')) {
+    logger.warn('Recoverable uncaught exception (not shutting down):', errorMsg);
+    return;
+  }
+  
+  logger.error('Fatal uncaught exception:', error);
   shutdown('uncaughtException');
 });
 
 process.on('unhandledRejection', (reason, promise) => {
+  const reasonMsg = reason?.message || String(reason);
+  
+  // Don't log timeout errors as errors
+  if (reasonMsg.includes('timeout') || 
+      reasonMsg.includes('ECONNRESET') ||
+      reasonMsg.includes('Connection terminated')) {
+    logger.warn('Recoverable unhandled rejection:', reasonMsg);
+    return;
+  }
+  
   logger.error('Unhandled rejection at:', promise, 'reason:', reason);
 });
 
