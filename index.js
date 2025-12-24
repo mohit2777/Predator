@@ -1308,6 +1308,72 @@ app.get('/api/debug/test-puppeteer', async (req, res) => {
   res.json(result);
 });
 
+// Debug endpoint to test WhatsApp client creation and capture exact error
+app.get('/api/debug/test-whatsapp', async (req, res) => {
+  const { Client } = require('whatsapp-web.js');
+  const result = {
+    success: false,
+    stage: 'init',
+    error: null,
+    details: {}
+  };
+  
+  let client = null;
+  try {
+    result.stage = 'creating_client';
+    
+    client = new Client({
+      authStrategy: null, // No auth for test
+      puppeteer: {
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-extensions'
+        ],
+        timeout: 60000
+      }
+    });
+    
+    result.stage = 'client_created';
+    result.details.clientCreated = true;
+    
+    // Set a timeout for initialization
+    const initPromise = client.initialize();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Initialization timeout after 30s')), 30000)
+    );
+    
+    result.stage = 'initializing';
+    
+    // Race between init and timeout
+    await Promise.race([initPromise, timeoutPromise]);
+    
+    result.success = true;
+    result.stage = 'initialized';
+    
+  } catch (e) {
+    result.error = e.message;
+    result.errorStack = e.stack?.split('\n').slice(0, 8);
+  } finally {
+    if (client) {
+      try { 
+        await client.destroy(); 
+      } catch (e) { 
+        result.destroyError = e.message;
+      }
+    }
+  }
+  
+  res.json(result);
+});
+
 // Webhook-style endpoint for UptimeRobot (alternative to /ping)
 app.post('/webhook/keepalive', (req, res) => {
   res.status(200).json({ 
