@@ -194,24 +194,27 @@ class RemoteAuth extends BaseAuthStrategy {
   }
 
   async logout() {
-    logger.info(`[RemoteAuth] Logging out account: ${this.accountId}`);
+    logger.info(`[RemoteAuth] logout() called for account: ${this.accountId}`);
     
+    // IMPORTANT: Do NOT automatically clear session data here!
+    // This method is called by whatsapp-web.js when it detects a disconnect,
+    // but we want to preserve the session for reconnection after app restarts.
+    // 
+    // The session will only be cleared when:
+    // 1. User explicitly deletes the account from dashboard
+    // 2. Too many failed QR attempts (corrupt session)
+    // 3. Authentication errors during init (corrupt session)
+    
+    logger.info(`[RemoteAuth] Session data PRESERVED for account: ${this.accountId}`);
+    logger.info(`[RemoteAuth] To clear session, delete the account from the dashboard.`);
+    
+    // Only clear temporary local files, NOT the database
+    const sessionPath = path.join(this.dataPath, this.accountId);
     try {
-      // Clear session from database
-      await db.clearSessionData(this.accountId);
-      
-      // Clear temporary files
-      const sessionPath = path.join(this.dataPath, this.accountId);
-      try {
-        await fs.rm(sessionPath, { recursive: true, force: true });
-      } catch (error) {
-        logger.warn('[RemoteAuth] Could not delete temp session files:', error.message);
-      }
-      
-      logger.info(`[RemoteAuth] Session cleared for account: ${this.accountId}`);
+      await fs.rm(sessionPath, { recursive: true, force: true });
+      logger.info(`[RemoteAuth] Local temp files cleared for: ${this.accountId}`);
     } catch (error) {
-      logger.error('[RemoteAuth] Error during logout:', error);
-      throw error;
+      logger.warn('[RemoteAuth] Could not delete temp session files:', error.message);
     }
   }
 

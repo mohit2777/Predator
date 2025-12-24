@@ -438,11 +438,15 @@ class WhatsAppManager {
         
         logger.warn(`WhatsApp client disconnected for account ${accountId}:`, reason);
 
-        // Clear session data on disconnect (will require QR scan to reconnect)
-        if (reason === 'LOGOUT' || reason === 'NAVIGATION') {
-          await db.clearSessionData(accountId);
-          logger.info(`Session data cleared for disconnected account ${accountId}`);
-        }
+        // NOTE: Do NOT clear session data on disconnect automatically!
+        // The session should persist so the app can reconnect after restarts.
+        // Session data is only cleared when user explicitly logs out via dashboard.
+        // The 'LOGOUT' reason can be triggered by:
+        // - Server restart (we want to keep session!)
+        // - Network issues (we want to keep session!)
+        // - User logout from phone (rare, user can manually disconnect from dashboard)
+        logger.info(`Session data preserved for account ${accountId} (disconnect reason: ${reason})`);
+        logger.info(`To clear session, use the dashboard logout button.`);
       } catch (error) {
         logger.error(`Error updating disconnected status for ${accountId}:`, error);
       }
@@ -1096,29 +1100,30 @@ class WhatsAppManager {
         return;
       }
 
-      // NOTE: We do NOT clean up temp session dirs here anymore
-      // Each account's RemoteAuth will restore its session from database
-      // Cleaning up would delete sessions before they can be restored!
-
       const accounts = await db.getAccounts();
+      logger.info(`Found ${accounts.length} accounts in database`);
       
-      // Only auto-initialize accounts that have session data (were previously connected)
+      // Check each account for session data
       const accountsWithSessions = [];
       for (const account of accounts) {
         try {
           const hasSession = await db.hasSessionData(account.id);
+          logger.info(`Account ${account.name} (${account.id}): hasSession=${hasSession}`);
+          
           if (hasSession) {
             accountsWithSessions.push(account);
+            logger.info(`✅ Account ${account.name} has saved session - will auto-connect`);
           } else {
-            // Mark accounts without sessions as disconnected
             this.accountStatus.set(account.id, 'disconnected');
+            logger.info(`⚠️ Account ${account.name} has no session - needs QR scan`);
           }
         } catch (err) {
           logger.warn(`Could not check session for ${account.id}:`, err.message);
+          this.accountStatus.set(account.id, 'disconnected');
         }
       }
 
-      logger.info(`Found ${accounts.length} accounts, ${accountsWithSessions.length} have saved sessions`);
+      logger.info(`Summary: ${accountsWithSessions.length}/${accounts.length} accounts have saved sessions`);
 
       // Limit concurrent initializations to reduce load
       const maxConcurrent = parseInt(process.env.MAX_CONCURRENT_INIT, 10) || 2;

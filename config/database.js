@@ -967,7 +967,12 @@ const db = {
 
       if (error) throw error;
 
-      return !!(data?.session_data);
+      const hasData = !!(data?.session_data);
+      const sessionSize = data?.session_data ? data.session_data.length : 0;
+      
+      logger.debug(`hasSessionData(${accountId}): hasData=${hasData}, size=${sessionSize}, lastSaved=${data?.last_session_saved}`);
+      
+      return hasData;
     }, `hasSessionData(${accountId})`).catch(error => {
       logger.error(`Error checking session data for ${accountId}:`, error);
       return false;
