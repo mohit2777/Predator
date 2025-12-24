@@ -1280,7 +1280,7 @@ app.get('/api/debug/test-puppeteer', async (req, res) => {
   let browser = null;
   try {
     browser = await puppeteer.launch({
-      headless: true,
+      headless: 'new',
       executablePath: result.executablePath,
       args: [
         '--no-sandbox',
@@ -1288,8 +1288,8 @@ app.get('/api/debug/test-puppeteer', async (req, res) => {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-first-run',
-        '--no-zygote',
-        '--single-process'
+        '--disable-extensions',
+        '--mute-audio'
       ],
       timeout: 30000
     });
@@ -1325,7 +1325,7 @@ app.get('/api/debug/test-whatsapp', async (req, res) => {
     client = new Client({
       authStrategy: null, // No auth for test
       puppeteer: {
-        headless: true,
+        headless: 'new',
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome',
         args: [
           '--no-sandbox',
@@ -1333,9 +1333,11 @@ app.get('/api/debug/test-whatsapp', async (req, res) => {
           '--disable-dev-shm-usage',
           '--disable-gpu',
           '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-extensions'
+          '--disable-extensions',
+          '--mute-audio',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding'
         ],
         timeout: 60000
       }

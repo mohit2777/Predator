@@ -14,6 +14,32 @@ const flowState = require('../services/flowState');
 const MEMORY_WARNING_THRESHOLD = 400 * 1024 * 1024; // 400MB
 const MEMORY_CRITICAL_THRESHOLD = 480 * 1024 * 1024; // 480MB
 
+// Shared Puppeteer config - optimized for Render/Docker
+const PUPPETEER_CONFIG = {
+  headless: 'new',
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-accelerated-2d-canvas',
+    '--no-first-run',
+    '--disable-gpu',
+    '--disable-extensions',
+    '--mute-audio',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-breakpad',
+    '--disable-sync',
+    '--disable-translate',
+    '--disable-features=AudioServiceOutOfProcess,TranslateUI',
+    '--disable-notifications'
+  ],
+  defaultViewport: { width: 800, height: 600 },
+  timeout: 90000
+};
+
 class WhatsAppManager {
   constructor() {
     this.clients = new Map(); // Store active WhatsApp clients
@@ -141,53 +167,10 @@ class WhatsAppManager {
         }),
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         webVersionCache: {
-          // Reuse cached WhatsApp Web bundle to shorten initialization time
           type: 'remote',
           remotePath: 'https://raw.githubusercontent.com/pedroslopez/whatsapp-web.js/main/webVersion.json'
         },
-        puppeteer: {
-          headless: true,
-          executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process', // Critical for containerized environments
-            '--disable-gpu',
-            '--disable-extensions',
-            '--disable-default-apps',
-            '--mute-audio',
-            '--no-default-browser-check',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--disable-background-networking',
-            '--disable-breakpad',
-            '--disable-sync',
-            '--disable-translate',
-            '--metrics-recording-only',
-            '--disable-hang-monitor',
-            '--disable-component-update',
-            '--disable-domain-reliability',
-            '--disable-client-side-phishing-detection',
-            '--disable-features=AudioServiceOutOfProcess,TranslateUI',
-            '--disable-ipc-flooding-protection',
-            '--disable-notifications',
-            '--disable-offer-store-unmasked-wallet-cards',
-            '--disable-popup-blocking',
-            '--disable-print-preview',
-            '--disable-prompt-on-repost',
-            '--disable-speech-api',
-            '--disable-web-security',
-            '--ignore-certificate-errors',
-            '--js-flags=--max-old-space-size=256'
-          ],
-          defaultViewport: { width: 800, height: 600 },
-          timeout: 60000 // 60 second timeout for browser launch
-        },
+        puppeteer: PUPPETEER_CONFIG,
         queueOptions: {
           messageProcessingTimeoutMs: 15000,
           concurrency: 5
@@ -1264,53 +1247,10 @@ class WhatsAppManager {
         }),
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         webVersionCache: {
-          // Use cached WhatsApp Web assets to avoid full downloads on every restart
           type: 'remote',
           remotePath: 'https://raw.githubusercontent.com/pedroslopez/whatsapp-web.js/main/webVersion.json'
         },
-        puppeteer: {
-          headless: true,
-          executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process', // Critical for containerized environments
-            '--disable-gpu',
-            '--disable-extensions',
-            '--disable-default-apps',
-            '--mute-audio',
-            '--no-default-browser-check',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--disable-background-networking',
-            '--disable-breakpad',
-            '--disable-sync',
-            '--disable-translate',
-            '--metrics-recording-only',
-            '--disable-hang-monitor',
-            '--disable-component-update',
-            '--disable-domain-reliability',
-            '--disable-client-side-phishing-detection',
-            '--disable-features=AudioServiceOutOfProcess,TranslateUI',
-            '--disable-ipc-flooding-protection',
-            '--disable-notifications',
-            '--disable-offer-store-unmasked-wallet-cards',
-            '--disable-popup-blocking',
-            '--disable-print-preview',
-            '--disable-prompt-on-repost',
-            '--disable-speech-api',
-            '--disable-web-security',
-            '--ignore-certificate-errors',
-            '--js-flags=--max-old-space-size=256'
-          ],
-          defaultViewport: { width: 800, height: 600 },
-          timeout: 60000 // 60 second timeout for browser launch
-        },
+        puppeteer: PUPPETEER_CONFIG,
         queueOptions: {
           messageProcessingTimeoutMs: 15000,
           concurrency: 5
