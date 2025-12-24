@@ -386,15 +386,22 @@ class WhatsAppManager {
         this.qrAttempts.delete(accountId);
 
         // Save session with multiple attempts after authentication
+        // Wait times are longer to ensure browser has written all session files
         if (client.authStrategy instanceof RemoteAuth) {
-          const saveAttempts = [3000, 6000, 10000]; // Wait times before each attempt
+          const saveAttempts = [5000, 10000, 15000]; // 5s, 10s, 15s - longer waits for reliability
           
           for (let i = 0; i < saveAttempts.length; i++) {
             await new Promise(resolve => setTimeout(resolve, saveAttempts[i]));
             
+            // Check if client is still valid
+            if (!this.clients.has(accountId)) {
+              logger.warn(`Client no longer exists for ${accountId}, skipping session save`);
+              break;
+            }
+            
             try {
               await client.authStrategy.saveSessionToDb();
-              logger.info(`Session saved after authentication for ${accountId} (attempt ${i + 1})`);
+              logger.info(`✅ Session saved after authentication for ${accountId} (attempt ${i + 1})`);
               break; // Success, exit loop
             } catch (saveErr) {
               if (i < saveAttempts.length - 1) {
@@ -413,6 +420,20 @@ class WhatsAppManager {
 
     client.on('loading_screen', (percent, message) => {
       logger.info(`[${accountId}] Loading... ${percent}% - ${message}`);
+      
+      // Save session when loading completes (100%)
+      if (percent === 100 && client.authStrategy instanceof RemoteAuth) {
+        setTimeout(async () => {
+          try {
+            if (this.clients.has(accountId)) {
+              await client.authStrategy.saveSessionToDb();
+              logger.info(`✅ Session saved after loading complete for ${accountId}`);
+            }
+          } catch (err) {
+            logger.warn(`Loading complete session save failed for ${accountId}:`, err.message);
+          }
+        }, 3000); // Wait 3s after loading completes
+      }
     });
 
     client.on('remote_session_saved', async () => {

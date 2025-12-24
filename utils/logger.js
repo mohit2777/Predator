@@ -51,27 +51,33 @@ const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
   format: logFormat,
   transports: [
-    // Write to file
+    // Always log to console for cloud deployments (Render, Railway, etc.)
+    new winston.transports.Console({
+      format: consoleFormat
+    }),
+    // Write to file (only works on non-ephemeral storage)
     new winston.transports.File({
       filename: path.join(logsDir, 'error.log'),
       level: 'error',
       maxsize: 5242880, // 5MB
-      maxFiles: 5
+      maxFiles: 5,
+      // Silently ignore file write errors on ephemeral filesystems
+      handleExceptions: false
     }),
     new winston.transports.File({
       filename: path.join(logsDir, 'combined.log'),
       maxsize: 5242880, // 5MB
-      maxFiles: 5
+      maxFiles: 5,
+      handleExceptions: false
     })
   ]
 });
 
-// Add console transport in development
-// Add console transport if in development OR if explicitly enabled
-if (process.env.NODE_ENV !== 'production' || process.env.LOG_TO_CONSOLE === 'true') {
-  logger.add(new winston.transports.Console({
-    format: consoleFormat
-  }));
-}
+// Handle file transport errors silently (ephemeral storage on Render)
+logger.transports.forEach(transport => {
+  if (transport instanceof winston.transports.File) {
+    transport.on('error', () => { /* Ignore file write errors */ });
+  }
+});
 
 module.exports = logger;
