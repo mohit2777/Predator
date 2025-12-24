@@ -82,48 +82,46 @@ const upload = multer({
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Session configuration with enhanced security
-// Auto-construct PostgreSQL connection from Supabase URL for session storage
-const createSessionStore = () => {
-  const dbPassword = process.env.SUPABASE_DB_PASSWORD;
-  
-  if (!dbPassword) {
-    logger.warn('SUPABASE_DB_PASSWORD not set - using MemoryStore (sessions lost on restart)');
-    return new session.MemoryStore();
-  }
-  
+// Use MemoryStore for simplicity - sessions will reset on server restart
+// To enable persistent sessions, set SUPABASE_DB_PASSWORD
+let sessionStore = new session.MemoryStore();
+
+if (process.env.SUPABASE_DB_PASSWORD) {
   try {
-    // Extract project ref from SUPABASE_URL (e.g., https://abc123.supabase.co -> abc123)
     const supabaseUrl = new URL(process.env.SUPABASE_URL);
     const projectRef = supabaseUrl.hostname.split('.')[0];
     
-    const pool = new pg.Pool({
+    const pgPool = new pg.Pool({
       host: `db.${projectRef}.supabase.co`,
       port: 5432,
       database: 'postgres',
       user: 'postgres',
-      password: dbPassword,
+      password: process.env.SUPABASE_DB_PASSWORD,
       ssl: { rejectUnauthorized: false },
-      family: 4 // Force IPv4 to avoid ENETUNREACH errors
+      family: 4,
+      connectionTimeoutMillis: 5000,
+      max: 3
     });
     
-    logger.info('Using Supabase PostgreSQL for session storage');
+    pgPool.on('error', (err) => {
+      logger.error('Session DB pool error:', err.message);
+    });
     
-    return new pgSession({
-      pool,
+    sessionStore = new pgSession({
+      pool: pgPool,
       tableName: 'session',
       createTableIfMissing: true,
-      pruneSessionInterval: 60 * 15
+      pruneSessionInterval: false, // Disable auto-prune to avoid errors
+      errorLog: (err) => logger.error('Session store error:', err.message)
     });
+    
+    logger.info('Using PostgreSQL for session storage');
   } catch (e) {
-    logger.error('Failed to create PostgreSQL session store:', e.message);
-    return new session.MemoryStore();
+    logger.error('PostgreSQL session setup failed, using MemoryStore:', e.message);
+    sessionStore = new session.MemoryStore();
   }
-};
-
-const sessionStore = createSessionStore();
-
-if (!process.env.DATABASE_URL && process.env.NODE_ENV === 'production') {
-  logger.warn('WARNING: Using MemoryStore in production. Set DATABASE_URL to use PostgreSQL session store.');
+} else {
+  logger.info('Using MemoryStore for sessions (set SUPABASE_DB_PASSWORD for persistence)');
 }
 
 // Generate a secure session secret if not provided
